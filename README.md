@@ -81,50 +81,53 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 ## Usage
 
-### Start a new session
+Loophole has two modes: **Legal** (moral-legal code) and **Chatbot** (system prompt stress-testing).
 
-Interactive mode:
+### Mode 1: Legal — Moral-Legal Code
+
+Build a formal legal code from your moral principles, then stress-test it.
+
 ```bash
+# Interactive
 uv run python -m loophole.main
-```
 
-Or directly with a domain and principles file:
-```bash
+# Or with a principles file
 uv run python -m loophole.main new --domain privacy -p examples/privacy_principles.txt
 ```
 
-You'll see the initial legal code, then the adversarial loop begins. Each round:
-1. Both adversarial agents attack the current code
-2. The Judge processes each case (auto-resolve or escalate)
-3. You see a summary and choose to continue, view the code, or stop
-
-When a case is escalated, you'll be prompted to make a decision. Your decision becomes a new constraint that the legal code must respect going forward.
-
-### Resume a session
-
-Sessions auto-save after every case. Pick up where you left off:
-```bash
-uv run python -m loophole.main resume
-```
-
-### Generate a visualization
-
-After a session (or for any past session), generate an HTML report:
-```bash
-uv run python -m loophole.main visualize
-```
-
-This creates a `report.html` in the session directory with:
-- Your moral principles and the initial legal code
-- A timeline of every adversarial case
-- Git-style diffs showing how the code changed after each case
-- The final legal code
-
-### List sessions
+Each round, adversarial agents find loopholes (legal but immoral) and overreach (illegal but moral). The Judge auto-resolves or escalates genuinely hard cases to you.
 
 ```bash
-uv run python -m loophole.main list
+uv run python -m loophole.main resume     # Resume a session
+uv run python -m loophole.main visualize  # Generate HTML report
+uv run python -m loophole.main list       # List sessions
 ```
+
+### Mode 2: Chatbot — System Prompt Stress-Testing
+
+Provide your company info and chatbot rules. Loophole generates a system prompt, then adversarial agents try to break it by actually running attacks against the chatbot and evaluating the responses.
+
+```bash
+# Interactive
+uv run python -m loophole.chatbot.main
+
+# Or with flags
+uv run python -m loophole.chatbot.main new --company "Acme Corp" --desc "Cloud storage provider"
+```
+
+Two adversarial agents attack each round:
+- **Jailbreak Finder**: crafts prompts that get the bot to discuss forbidden topics. Each attack is actually *run* against the system prompt, then evaluated.
+- **Refusal Finder**: crafts legitimate customer questions the bot wrongly refuses. Also run and evaluated.
+
+Only confirmed failures (where the bot actually misbehaved) get through to the Judge. If neither adversary can break the prompt for 2 consecutive rounds, the system declares it robust.
+
+```bash
+uv run python -m loophole.chatbot.main resume     # Resume
+uv run python -m loophole.chatbot.main visualize  # HTML report
+uv run python -m loophole.chatbot.main list       # List sessions
+```
+
+The HTML report shows each failure as a chat conversation: the attack prompt, the bot's actual response, why it failed, and the git-style diff of how the system prompt was patched.
 
 ## Configuration
 
@@ -162,18 +165,29 @@ See `examples/privacy_principles.txt` for a starting point.
 
 ```
 loophole/
-  main.py              CLI and main adversarial loop
-  models.py            Data models (SessionState, Case, LegalCode)
-  llm.py               Anthropic SDK wrapper
-  prompts.py           All agent prompt templates
-  session.py           Session persistence (JSON + markdown)
-  visualize.py         HTML report generator
+  main.py              Legal mode — CLI and adversarial loop
+  models.py            Legal data models (SessionState, Case, LegalCode)
+  llm.py               Shared Anthropic SDK wrapper
+  prompts.py           Legal agent prompt templates
+  session.py           Legal session persistence
+  visualize.py         Legal HTML report generator
   agents/
-    base.py            Base agent class
-    legislator.py      Drafts and revises the legal code
+    base.py            Shared base agent class
+    legislator.py      Drafts and revises legal code
     loophole_finder.py Finds legal-but-immoral scenarios
     overreach_finder.py Finds illegal-but-moral scenarios
-    judge.py           Auto-resolves cases or escalates
+    judge.py           Auto-resolves or escalates
+  chatbot/
+    main.py            Chatbot mode — CLI and adversarial loop
+    models.py          Chatbot data models (ChatbotSession, TestCase, etc.)
+    prompts.py         Chatbot agent prompt templates
+    session.py         Chatbot session persistence
+    visualize.py       Chatbot HTML report generator
+    agents/
+      drafter.py       Writes and revises system prompts
+      jailbreak.py     Crafts + runs + evaluates jailbreak attacks
+      refusal.py       Crafts + runs + evaluates false refusal tests
+      judge.py         Auto-resolves or escalates
 
 sessions/              One directory per session (auto-created)
 examples/              Example moral principles files
