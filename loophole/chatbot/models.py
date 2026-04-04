@@ -18,13 +18,20 @@ class CaseStatus(str, Enum):
     USER_RESOLVED = "user_resolved"
 
 
+class ConversationTurn(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+
 class TestCase(BaseModel):
     id: int
     round: int
     attack_type: AttackType
-    attack_prompt: str  # The adversarial user message
-    bot_response: str  # What the bot actually said
+    attack_prompt: str  # The final adversarial user message (or summary)
+    bot_response: str  # The bot's final response
+    conversation: list[ConversationTurn] = Field(default_factory=list)  # Full multi-turn log
     evaluation: str  # Why this is a failure
+    succeeded: bool = True  # False for logged-but-held attempts
     status: CaseStatus = CaseStatus.PENDING
     resolution: str | None = None
     resolved_by: str | None = None  # "judge" or "user"
@@ -53,7 +60,8 @@ class ChatbotSession(BaseModel):
     user_clarifications: list[str] = Field(default_factory=list)
     current_prompt: SystemPrompt
     prompt_history: list[SystemPrompt] = Field(default_factory=list)
-    cases: list[TestCase] = Field(default_factory=list)
+    cases: list[TestCase] = Field(default_factory=list)  # Only confirmed failures
+    attempts: list[TestCase] = Field(default_factory=list)  # ALL attempts (pass and fail)
     current_round: int = 0
     created_at: datetime = Field(default_factory=datetime.now)
 

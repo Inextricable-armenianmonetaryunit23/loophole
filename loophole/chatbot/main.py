@@ -121,13 +121,23 @@ def _run_adversarial_loop(state: ChatbotSession, agents: dict, session_mgr: Chat
         console.print(Rule(f"[bold] Round {state.current_round} [/bold]", style="cyan"))
 
         # Phase 1: Adversarial attacks (craft, run, evaluate)
-        console.print("\n[bold]Running jailbreak attacks...[/bold]", end="")
-        jailbreaks = jailbreak_finder.find(state)
-        console.print(f" [red]{len(jailbreaks)} confirmed failures[/red]")
+        console.print("\n[bold]Running jailbreak attacks (single + multi-turn)...[/bold]", end="")
+        jailbreaks, jailbreak_attempts = jailbreak_finder.find(state)
+        state.attempts.extend(jailbreak_attempts)
+        console.print(
+            f" {len(jailbreak_attempts)} attempted, "
+            f"[red]{len(jailbreaks)} confirmed failures[/red]"
+        )
 
         console.print("[bold]Running refusal tests...[/bold]", end="")
-        refusals = refusal_finder.find(state)
-        console.print(f" [yellow]{len(refusals)} confirmed failures[/yellow]")
+        refusals, refusal_attempts = refusal_finder.find(state)
+        state.attempts.extend(refusal_attempts)
+        console.print(
+            f" {len(refusal_attempts)} attempted, "
+            f"[yellow]{len(refusals)} confirmed failures[/yellow]"
+        )
+
+        session_mgr.save(state)  # Save attempts even if no failures
 
         all_cases = jailbreaks + refusals
 

@@ -79,16 +79,34 @@ def _render_case_log(state: ChatbotSession) -> str:
         CaseStatus.PENDING: "Pending",
     }
 
-    for case in state.cases:
-        label = status_labels.get(case.status, case.status.value)
-        type_label = "JAILBREAK" if case.attack_type.value == "jailbreak" else "FALSE REFUSAL"
-        lines.append(f"## Case #{case.id} ({type_label}) — Round {case.round}")
-        lines.append(f"**Status:** {label}\n")
-        lines.append(f"**Attack prompt:** {case.attack_prompt}\n")
-        lines.append(f"**Bot response:** {case.bot_response}\n")
-        lines.append(f"**Problem:** {case.evaluation}\n")
-        if case.resolution:
-            lines.append(f"**Resolution:** {case.resolution}\n")
-        lines.append("---\n")
+    if state.cases:
+        lines.append("## Confirmed Failures\n")
+        for case in state.cases:
+            label = status_labels.get(case.status, case.status.value)
+            type_label = "JAILBREAK" if case.attack_type.value == "jailbreak" else "FALSE REFUSAL"
+            lines.append(f"### Case #{case.id} ({type_label}) — Round {case.round}")
+            lines.append(f"**Status:** {label}\n")
+            lines.append(f"**Attack prompt:** {case.attack_prompt}\n")
+            lines.append(f"**Bot response:** {case.bot_response}\n")
+            lines.append(f"**Problem:** {case.evaluation}\n")
+            if case.resolution:
+                lines.append(f"**Resolution:** {case.resolution}\n")
+            lines.append("---\n")
+
+    if state.attempts:
+        held = [a for a in state.attempts if not a.succeeded]
+        if held:
+            lines.append("## Attacks That Were Blocked\n")
+            for attempt in held:
+                type_label = "JAILBREAK" if attempt.attack_type.value == "jailbreak" else "REFUSAL TEST"
+                lines.append(f"### [{type_label}] Round {attempt.round}")
+                lines.append(f"**Prompt:** {attempt.attack_prompt}\n")
+                lines.append(f"**Response:** {attempt.bot_response[:300]}...\n")
+                lines.append(f"**Result:** Bot held — {attempt.evaluation}\n")
+                lines.append("---\n")
+
+    lines.append(f"\n*Total attempts: {len(state.attempts)} | "
+                 f"Blocked: {len([a for a in state.attempts if not a.succeeded])} | "
+                 f"Broke through: {len([a for a in state.attempts if a.succeeded])}*")
 
     return "\n".join(lines)

@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 from loophole.agents.base import BaseAgent
-from loophole.chatbot.models import AttackType, ChatbotSession, TestCase
+from loophole.chatbot.models import AttackType, ChatbotSession, ConversationTurn, TestCase
 from loophole.chatbot.prompts import (
     EVALUATOR_REFUSAL,
     EVALUATOR_SYSTEM,
@@ -22,6 +22,16 @@ def _format_prior_cases(cases: list[TestCase]) -> str:
         parts.append(
             f"Case #{c.id} ({c.attack_type.value}): {c.attack_prompt[:150]}..."
         )
+    return "\n".join(parts)
+
+
+def _format_prior_attempts(attempts: list[TestCase]) -> str:
+    if not attempts:
+        return "(none yet)"
+    parts = []
+    for a in attempts:
+        held = "WRONGLY REFUSED" if a.succeeded else "ANSWERED OK"
+        parts.append(f"[{held}] {a.attack_prompt[:120]}...")
     return "\n".join(parts)
 
 
@@ -45,42 +55,53 @@ class RefusalFinder(BaseAgent):
             prompt_version=state.current_prompt.version,
             system_prompt=state.current_prompt.text,
             prior_cases_text=_format_prior_cases(state.cases),
+            prior_attempts_text=_format_prior_attempts(
+                [a for a in state.attempts if a.attack_type == AttackType.REFUSAL]
+            ),
             cases_per_agent=self.cases_per_agent,
         )
 
-    def find(self, state: ChatbotSession) -> list[TestCase]:
-        """Craft legitimate requests, run them, check for false refusals."""
-        # Step 1: Craft test prompts
+    def find(self, state: ChatbotSession) -> tuple[list[TestCase], list[TestCase]]:
+        """Returns (confirmed_failures, all_attempts)."""
         raw = self.run(state)
         attacks = _parse_attacks(raw)
 
         confirmed: list[TestCase] = []
+        all_attempts: list[TestCase] = []
+
         for attack_prompt, strategy in attacks:
-            # Step 2: Run against the chatbot
             bot_response = self.llm.call(
                 system=state.current_prompt.text,
                 user_message=attack_prompt,
                 temperature=0.3,
             )
 
-            # Step 3: Evaluate — did the bot wrongly refuse?
-            eval_result = self._evaluate(state, attack_prompt, bot_response)
-            if eval_result is not None:
-                confirmed.append(
-                    TestCase(
-                        id=state.next_case_id + len(confirmed),
-                        round=state.current_round,
-                        attack_type=AttackType.REFUSAL,
-                        bot_response=bot_response,
-                        attack_prompt=attack_prompt,
-                        evaluation=eval_result,
-                    )
-                )
+            conversation = [
+                ConversationTurn(role="user", content=attack_prompt),
+                ConversationTurn(role="assistant", content=bot_response),
+            ]
 
-        return confirmed
+            eval_result = self._evaluate(state, attack_prompt, bot_response)
+            succeeded = eval_result is not None
+
+            attempt = TestCase(
+                id=state.next_case_id + len(confirmed),
+                round=state.current_round,
+                attack_type=AttackType.REFUSAL,
+                attack_prompt=attack_prompt,
+                bot_response=bot_response,
+                conversation=conversation,
+                evaluation=eval_result or f"Bot answered correctly. Strategy: {strategy}",
+                succeeded=succeeded,
+            )
+            all_attempts.append(attempt)
+
+            if succeeded:
+                confirmed.append(attempt)
+
+        return confirmed, all_attempts
 
     def _evaluate(self, state: ChatbotSession, attack_prompt: str, bot_response: str) -> str | None:
-        """Returns evaluation text if the bot wrongly refused, None if it answered correctly."""
         cfg = state.config
         eval_msg = EVALUATOR_REFUSAL.format(
             system_prompt=state.current_prompt.text,
