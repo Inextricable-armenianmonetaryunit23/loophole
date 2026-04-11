@@ -15,7 +15,8 @@ from loophole.agents.judge import Judge
 from loophole.agents.legislator import Legislator
 from loophole.agents.loophole_finder import LoopholeFinder
 from loophole.agents.overreach_finder import OverreachFinder
-from loophole.llm import LLMClient
+from loophole.agents.simplifier import Simplifier
+from loophole.llm import LLMClient, _infer_provider, create_provider
 from loophole.models import CaseStatus, CaseType, LegalCode, SessionState
 from loophole.session import SessionManager
 
@@ -40,20 +41,42 @@ def _load_config() -> dict:
     }
 
 
-def _build_agents(config: dict) -> dict:
-    model = config["model"]["default"]
+def _resolve_provider(config: dict, role: str):
+    """Create an LLM provider for a given agent role, using per-role overrides if set."""
     max_tokens = config["model"]["max_tokens"]
+    providers = config["model"].get("providers", {})
+
+    if role in providers:
+        role_cfg = providers[role]
+        return create_provider(
+            provider=role_cfg["provider"],
+            model=role_cfg["model"],
+            max_tokens=max_tokens,
+            base_url=role_cfg.get("base_url"),
+        )
+
+    # Fallback to default model
+    model = config["model"]["default"]
+    return create_provider(_infer_provider(model), model, max_tokens)
+
+
+def _build_agents(config: dict) -> dict:
     temps = config["temperatures"]
     cases_per = config["loop"]["cases_per_agent"]
 
-    llm = LLMClient(model=model, max_tokens=max_tokens)
-
-    return {
-        "legislator": Legislator(llm, temperature=temps["legislator"]),
-        "loophole": LoopholeFinder(llm, temperature=temps["loophole_finder"], cases_per_agent=cases_per),
-        "overreach": OverreachFinder(llm, temperature=temps["overreach_finder"], cases_per_agent=cases_per),
-        "judge": Judge(llm, temperature=temps["judge"]),
+    agents = {
+        "legislator": Legislator(_resolve_provider(config, "legislator"), temperature=temps["legislator"]),
+        "loophole": LoopholeFinder(_resolve_provider(config, "loophole_finder"), temperature=temps["loophole_finder"], cases_per_agent=cases_per),
+        "overreach": OverreachFinder(_resolve_provider(config, "overreach_finder"), temperature=temps["overreach_finder"], cases_per_agent=cases_per),
+        "judge": Judge(_resolve_provider(config, "judge"), temperature=temps["judge"]),
     }
+
+    if config.get("simplify", {}).get("enabled", False):
+        agents["simplifier"] = Simplifier(
+            _resolve_provider(config, "legislator"), temperature=temps["legislator"]
+        )
+
+    return agents
 
 
 def _display_legal_code(code: LegalCode) -> None:
@@ -98,8 +121,107 @@ def _get_multiline_input(prompt_text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _oversight_review(state, case_obj, result, revised):
+    """Let user review an auto-resolution. Returns (accept, modification_text)."""
+    import difflib
+
+    console.print()
+    console.print(
+        Panel(
+            f"[bold]Judge reasoning:[/bold]\n{result.reasoning}\n\n"
+            f"[bold]Resolution:[/bold]\n{result.resolution_summary or '(see proposed revision)'}",
+            title="[yellow]Oversight Review[/yellow]",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    )
+
+    diff = difflib.unified_diff(
+        state.current_code.text.splitlines(),
+        revised.text.splitlines(),
+        fromfile=f"v{state.current_code.version}",
+        tofile=f"v{revised.version}",
+        lineterm="",
+        n=3,
+    )
+    diff_text = "\n".join(diff)
+    if diff_text:
+        console.print(Panel(diff_text, title="Proposed Changes", border_style="cyan"))
+
+    action = Prompt.ask(
+        "[bold]Accept this resolution?[/bold]",
+        choices=["accept", "reject", "modify"],
+        default="accept",
+    )
+
+    if action == "accept":
+        return True, None
+    if action == "reject":
+        return False, None
+    modification = _get_multiline_input("Enter your modification instructions:")
+    return True, modification
+
+
+def _run_simplification(state, agents, session_mgr, config):
+    """Run a simplification pass on the current legal code."""
+    import difflib
+
+    simplifier = agents.get("simplifier")
+    judge: Judge = agents["judge"]
+    oversight = config.get("oversight", False)
+
+    if not simplifier or not state.resolved_cases:
+        return
+
+    console.print(Rule("[bold magenta] Simplification Pass [/bold magenta]", style="magenta"))
+
+    old_length = len(state.current_code.text)
+    console.print(f"[dim]Current code: {old_length} characters[/dim]")
+
+    proposed = simplifier.simplify(state)
+    if not proposed:
+        console.print("[yellow]Simplifier could not produce a shorter version.[/yellow]")
+        return
+
+    new_length = len(proposed.text)
+    reduction = (1 - new_length / old_length) * 100
+    console.print(f"[dim]Proposed: {new_length} characters ({reduction:.0f}% reduction)[/dim]")
+
+    console.print("[dim]Validating simplified version...[/dim]", end="")
+    validation = judge.validate(state, proposed.text)
+
+    if not validation.passes:
+        console.print(" [red]Validation failed — keeping current version[/red]")
+        console.print(f"[dim]{validation.details}[/dim]")
+        return
+
+    console.print(" [green]Validation passed[/green]")
+
+    if oversight:
+        diff = difflib.unified_diff(
+            state.current_code.text.splitlines(),
+            proposed.text.splitlines(),
+            fromfile=f"v{state.current_code.version}",
+            tofile=f"v{proposed.version}",
+            lineterm="",
+            n=3,
+        )
+        diff_text = "\n".join(diff)
+        if diff_text:
+            console.print(Panel(diff_text, title="Simplification Diff", border_style="magenta"))
+        if not Confirm.ask("Accept simplified version?", default=True):
+            console.print("[yellow]Simplification rejected.[/yellow]")
+            return
+
+    state.current_code = proposed
+    state.code_history.append(proposed)
+    session_mgr.save(state)
+    console.print(f"[green bold]Simplified! Code now at v{proposed.version}[/green bold]")
+
+
 def _run_adversarial_loop(state, agents, session_mgr, config):
     max_rounds = config["loop"]["max_rounds"]
+    oversight = config.get("oversight", False)
     legislator: Legislator = agents["legislator"]
     loophole_finder: LoopholeFinder = agents["loophole"]
     overreach_finder: OverreachFinder = agents["overreach"]
@@ -155,6 +277,23 @@ def _run_adversarial_loop(state, agents, session_mgr, config):
 
                     validation = judge.validate(state, revised.text)
                     if validation.passes:
+                        # Oversight gate
+                        if oversight:
+                            accept, modification = _oversight_review(
+                                state, case_obj, result, revised
+                            )
+                            if not accept:
+                                case_obj.status = CaseStatus.ESCALATED
+                                case_obj.resolution = None
+                                case_obj.resolved_by = None
+                                _escalate(state, case_obj, "User rejected auto-resolution.", legislator)
+                                round_escalated += 1
+                                session_mgr.save(state)
+                                continue
+                            if modification:
+                                case_obj.resolution = modification
+                                revised = legislator.revise(state, case_obj)
+
                         state.current_code = revised
                         state.code_history.append(revised)
                         console.print(
@@ -176,6 +315,24 @@ def _run_adversarial_loop(state, agents, session_mgr, config):
                     case_obj.resolved_by = "judge"
 
                     revised = legislator.revise(state, case_obj)
+
+                    # Oversight gate
+                    if oversight:
+                        accept, modification = _oversight_review(
+                            state, case_obj, result, revised
+                        )
+                        if not accept:
+                            case_obj.status = CaseStatus.ESCALATED
+                            case_obj.resolution = None
+                            case_obj.resolved_by = None
+                            _escalate(state, case_obj, "User rejected auto-resolution.", legislator)
+                            round_escalated += 1
+                            session_mgr.save(state)
+                            continue
+                        if modification:
+                            case_obj.resolution = modification
+                            revised = legislator.revise(state, case_obj)
+
                     state.current_code = revised
                     state.code_history.append(revised)
                     console.print(
@@ -193,6 +350,11 @@ def _run_adversarial_loop(state, agents, session_mgr, config):
         # Round summary
         _display_round_summary(state, len(all_cases), round_auto, round_escalated)
 
+        # Periodic simplification
+        simplify_every = config.get("simplify", {}).get("every_n_rounds", 0)
+        if simplify_every > 0 and state.current_round % simplify_every == 0:
+            _run_simplification(state, agents, session_mgr, config)
+
         # Continue?
         console.print()
         action = Prompt.ask(
@@ -206,6 +368,10 @@ def _run_adversarial_loop(state, agents, session_mgr, config):
                 break
         elif action == "stop":
             break
+
+    # Final simplification pass
+    if config.get("simplify", {}).get("enabled", False):
+        _run_simplification(state, agents, session_mgr, config)
 
     console.print(Rule("[bold green] Session Complete [/bold green]", style="green"))
     _display_legal_code(state.current_code)
@@ -271,6 +437,9 @@ def _display_round_summary(state, total, auto, escalated):
 def new(
     domain: str = typer.Option(None, help="Domain for the legal code (e.g., privacy, property, speech)"),
     principles_file: str = typer.Option(None, "--principles", "-p", help="Path to a text file with moral principles"),
+    oversight: bool = typer.Option(False, "--oversight", help="Review every auto-judge decision before accepting"),
+    simplify: bool = typer.Option(False, "--simplify", help="Enable simplification passes to compress the legal code"),
+    simplify_every: int = typer.Option(0, "--simplify-every", help="Simplify every N rounds (0 = only at end)"),
 ):
     """Start a new Loophole session."""
     console.print(
@@ -283,6 +452,11 @@ def new(
     )
 
     config = _load_config()
+    if oversight:
+        config["oversight"] = True
+    if simplify:
+        config.setdefault("simplify", {})["enabled"] = True
+        config["simplify"]["every_n_rounds"] = simplify_every
     agents = _build_agents(config)
 
     if not domain:
@@ -322,9 +496,17 @@ def new(
 @app.command()
 def resume(
     session_id: str = typer.Argument(None, help="Session ID to resume"),
+    oversight: bool = typer.Option(False, "--oversight", help="Review every auto-judge decision before accepting"),
+    simplify: bool = typer.Option(False, "--simplify", help="Enable simplification passes to compress the legal code"),
+    simplify_every: int = typer.Option(0, "--simplify-every", help="Simplify every N rounds (0 = only at end)"),
 ):
     """Resume an existing session."""
     config = _load_config()
+    if oversight:
+        config["oversight"] = True
+    if simplify:
+        config.setdefault("simplify", {})["enabled"] = True
+        config["simplify"]["every_n_rounds"] = simplify_every
     session_mgr = SessionManager(config["session_dir"])
 
     if not session_id:

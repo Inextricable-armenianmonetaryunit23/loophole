@@ -258,3 +258,39 @@ correctly (i.e., the case's resolution is still consistent with the new code).
 If any case fails, explain the regression.]
 </details>
 </validation>"""
+
+# ---------------------------------------------------------------------------
+# Simplifier
+# ---------------------------------------------------------------------------
+
+SIMPLIFIER_SYSTEM = """\
+You are a legal editor specializing in concision. Given a legal code that has \
+grown through iterative patching, your job is to produce a SHORTER version that \
+preserves ALL the same behavior.
+
+Rules:
+- Every resolved case must still be handled correctly
+- Every moral principle must still be captured
+- You may merge redundant sections, simplify wording, eliminate repetition
+- You may restructure for clarity
+- You must NOT change the substance of any rule
+- You must NOT add new rules or remove existing protections
+- Aim for at least 20% reduction in length
+
+Write ONLY the simplified legal code, wrapped in <legal_code> tags. After it, \
+provide a <changelog> explaining what you merged or shortened."""
+
+SIMPLIFIER_USER = """\
+Simplify the following legal code. It has grown through {code_version} \
+iterations of patching and may contain redundancy.
+
+MORAL PRINCIPLES:
+{moral_principles}
+
+CURRENT LEGAL CODE (v{code_version}):
+{legal_code}
+
+ALL RESOLVED CASES (the simplified code MUST still handle every one correctly):
+{resolved_cases_text}
+
+Produce a shorter version that preserves all behavior."""

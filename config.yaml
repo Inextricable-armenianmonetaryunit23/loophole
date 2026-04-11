@@ -2,6 +2,24 @@ model:
   default: "claude-sonnet-4-20250514"
   bot: "claude-haiku-4-5-20251001"  # Weaker model for the chatbot being tested
   max_tokens: 4096
+  # Optional per-role provider overrides (uncomment to use):
+  # providers:
+  #   legislator:
+  #     provider: anthropic
+  #     model: claude-sonnet-4-20250514
+  #   loophole_finder:
+  #     provider: openai
+  #     model: gpt-4o
+  #   overreach_finder:
+  #     provider: ollama
+  #     model: llama3.1:70b
+  #     base_url: http://localhost:11434/v1
+  #   judge:
+  #     provider: anthropic
+  #     model: claude-sonnet-4-20250514
+  #   bot:
+  #     provider: anthropic
+  #     model: claude-haiku-4-5-20251001
 
 temperatures:
   legislator: 0.4
@@ -12,5 +30,11 @@ temperatures:
 loop:
   max_rounds: 10
   cases_per_agent: 3
+
+oversight: false  # Set true (or use --oversight) to review every auto-judge decision
+
+simplify:
+  enabled: false    # Set true (or use --simplify) to enable simplification passes
+  every_n_rounds: 0 # 0 = simplify only at session end; N = also simplify every N rounds
 
 session_dir: "sessions"

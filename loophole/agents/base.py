@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from loophole.llm import LLMClient
+from loophole.llm import LLMProvider
 from loophole.models import SessionState
 
 
 class BaseAgent:
-    def __init__(self, llm: LLMClient, temperature: float = 0.5):
+    def __init__(self, llm: LLMProvider, temperature: float = 0.5):
         self.llm = llm
         self.temperature = temperature
 

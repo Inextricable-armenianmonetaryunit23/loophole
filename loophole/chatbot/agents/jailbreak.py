@@ -13,7 +13,7 @@ from loophole.chatbot.prompts import (
     JAILBREAK_SYSTEM,
     JAILBREAK_USER,
 )
-from loophole.llm import LLMClient
+from loophole.llm import LLMProvider
 
 
 def _format_prior_cases(cases: list[TestCase]) -> str:
@@ -43,7 +43,7 @@ class JailbreakFinder(BaseAgent):
         llm: LLMClient,
         temperature: float = 0.9,
         cases_per_agent: int = 3,
-        bot_llm: LLMClient | None = None,
+        bot_llm: LLMProvider | None = None,
     ):
         super().__init__(llm, temperature=temperature)
         self.cases_per_agent = cases_per_agent
@@ -148,14 +148,11 @@ class JailbreakFinder(BaseAgent):
             conversation.append(ConversationTurn(role="user", content=user_msg))
 
             # Use the weaker bot model
-            response = self.bot_llm.client.messages.create(
-                model=self.bot_llm.model,
-                max_tokens=self.bot_llm.max_tokens,
-                temperature=0.3,
+            bot_response = self.bot_llm.call_messages(
                 system=state.current_prompt.text,
                 messages=messages,
+                temperature=0.3,
             )
-            bot_response = response.content[0].text
             messages.append({"role": "assistant", "content": bot_response})
             conversation.append(ConversationTurn(role="assistant", content=bot_response))
 

@@ -427,3 +427,47 @@ still be answered).
 [For each case, briefly state pass or fail. If any fail, explain the regression.]
 </details>
 </validation>"""
+
+# ---------------------------------------------------------------------------
+# Simplifier
+# ---------------------------------------------------------------------------
+
+SIMPLIFIER_SYSTEM = """\
+You are an expert at writing concise LLM system prompts. Given a system prompt \
+that has grown through iterative patching, your job is to produce a SHORTER \
+version that preserves ALL the same behavior.
+
+Rules:
+- Every resolved failure case must still be handled correctly
+- All topic restrictions must still be enforced
+- All allowed topics must still be answered
+- You may merge redundant instructions, simplify wording, eliminate repetition
+- You may restructure for clarity
+- You must NOT change the substance of any rule
+- You must NOT add new rules or remove existing protections
+- Aim for at least 20% reduction in length
+
+Write ONLY the simplified system prompt, wrapped in <system_prompt> tags. \
+After it, provide a <changelog> explaining what you merged or shortened."""
+
+SIMPLIFIER_USER = """\
+Simplify the following chatbot system prompt. It has grown through \
+{prompt_version} iterations of patching and may contain redundancy.
+
+COMPANY: {company_name}
+DESCRIPTION: {company_description}
+PURPOSE: {chatbot_purpose}
+
+TOPICS TO HELP WITH:
+{should_talk_about}
+
+TOPICS TO AVOID:
+{should_not_talk_about}
+
+CURRENT SYSTEM PROMPT (v{prompt_version}):
+{system_prompt}
+
+ALL RESOLVED CASES (the simplified prompt MUST still handle every one correctly):
+{resolved_cases_text}
+
+Produce a shorter version that preserves all behavior."""

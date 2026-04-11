@@ -15,9 +15,10 @@ from loophole.chatbot.agents.drafter import Drafter
 from loophole.chatbot.agents.jailbreak import JailbreakFinder
 from loophole.chatbot.agents.judge import Judge
 from loophole.chatbot.agents.refusal import RefusalFinder
+from loophole.chatbot.agents.simplifier import Simplifier
 from loophole.chatbot.models import AttackType, CaseStatus, ChatbotConfig, ChatbotSession, SystemPrompt
 from loophole.chatbot.session import ChatbotSessionManager
-from loophole.llm import LLMClient
+from loophole.llm import _infer_provider, create_provider
 
 app = typer.Typer(name="loophole-chatbot", add_completion=False)
 console = Console()
@@ -40,22 +41,47 @@ def _load_config() -> dict:
     }
 
 
-def _build_agents(config: dict, weak: bool = False) -> dict:
-    model = config["model"]["default"]
-    bot_model = config["model"].get("bot", "claude-haiku-4-5-20251001")
+def _resolve_provider(config: dict, role: str):
+    """Create an LLM provider for a given agent role, using per-role overrides if set."""
     max_tokens = config["model"]["max_tokens"]
+    providers = config["model"].get("providers", {})
+
+    if role in providers:
+        role_cfg = providers[role]
+        return create_provider(
+            provider=role_cfg["provider"],
+            model=role_cfg["model"],
+            max_tokens=max_tokens,
+            base_url=role_cfg.get("base_url"),
+        )
+
+    # Fallback: 'bot' role falls back to config["model"]["bot"], others to default
+    if role == "bot":
+        model = config["model"].get("bot", "claude-haiku-4-5-20251001")
+    else:
+        model = config["model"]["default"]
+    return create_provider(_infer_provider(model), model, max_tokens)
+
+
+def _build_agents(config: dict, weak: bool = False) -> dict:
     temps = config["temperatures"]
     cases_per = config["loop"]["cases_per_agent"]
 
-    llm = LLMClient(model=model, max_tokens=max_tokens)
-    bot_llm = LLMClient(model=bot_model, max_tokens=max_tokens)
+    bot_llm = _resolve_provider(config, "bot")
 
-    return {
-        "drafter": Drafter(llm, temperature=temps["legislator"], weak=weak),
-        "jailbreak": JailbreakFinder(llm, temperature=temps["loophole_finder"], cases_per_agent=cases_per, bot_llm=bot_llm),
-        "refusal": RefusalFinder(llm, temperature=temps["overreach_finder"], cases_per_agent=cases_per, bot_llm=bot_llm),
-        "judge": Judge(llm, temperature=temps["judge"]),
+    agents = {
+        "drafter": Drafter(_resolve_provider(config, "legislator"), temperature=temps["legislator"], weak=weak),
+        "jailbreak": JailbreakFinder(_resolve_provider(config, "loophole_finder"), temperature=temps["loophole_finder"], cases_per_agent=cases_per, bot_llm=bot_llm),
+        "refusal": RefusalFinder(_resolve_provider(config, "overreach_finder"), temperature=temps["overreach_finder"], cases_per_agent=cases_per, bot_llm=bot_llm),
+        "judge": Judge(_resolve_provider(config, "judge"), temperature=temps["judge"]),
     }
+
+    if config.get("simplify", {}).get("enabled", False):
+        agents["simplifier"] = Simplifier(
+            _resolve_provider(config, "legislator"), temperature=temps["legislator"]
+        )
+
+    return agents
 
 
 def _display_prompt(prompt: SystemPrompt) -> None:
@@ -109,8 +135,107 @@ def _get_multiline_input(prompt_text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _run_simplification(state, agents, session_mgr, config):
+    """Run a simplification pass on the current system prompt."""
+    import difflib
+
+    simplifier = agents.get("simplifier")
+    judge: Judge = agents["judge"]
+    oversight = config.get("oversight", False)
+
+    if not simplifier or not state.resolved_cases:
+        return
+
+    console.print(Rule("[bold magenta] Simplification Pass [/bold magenta]", style="magenta"))
+
+    old_length = len(state.current_prompt.text)
+    console.print(f"[dim]Current prompt: {old_length} characters[/dim]")
+
+    proposed = simplifier.simplify(state)
+    if not proposed:
+        console.print("[yellow]Simplifier could not produce a shorter version.[/yellow]")
+        return
+
+    new_length = len(proposed.text)
+    reduction = (1 - new_length / old_length) * 100
+    console.print(f"[dim]Proposed: {new_length} characters ({reduction:.0f}% reduction)[/dim]")
+
+    console.print("[dim]Validating simplified version...[/dim]", end="")
+    validation = judge.validate(state, proposed.text)
+
+    if not validation.passes:
+        console.print(" [red]Validation failed — keeping current version[/red]")
+        console.print(f"[dim]{validation.details}[/dim]")
+        return
+
+    console.print(" [green]Validation passed[/green]")
+
+    if oversight:
+        diff = difflib.unified_diff(
+            state.current_prompt.text.splitlines(),
+            proposed.text.splitlines(),
+            fromfile=f"v{state.current_prompt.version}",
+            tofile=f"v{proposed.version}",
+            lineterm="",
+            n=3,
+        )
+        diff_text = "\n".join(diff)
+        if diff_text:
+            console.print(Panel(diff_text, title="Simplification Diff", border_style="magenta"))
+        if not Confirm.ask("Accept simplified version?", default=True):
+            console.print("[yellow]Simplification rejected.[/yellow]")
+            return
+
+    state.current_prompt = proposed
+    state.prompt_history.append(proposed)
+    session_mgr.save(state)
+    console.print(f"[green bold]Simplified! Prompt now at v{proposed.version}[/green bold]")
+
+
+def _oversight_review(state, case_obj, result, revised):
+    """Let user review an auto-resolution. Returns (accept, modification_text)."""
+    import difflib
+
+    console.print()
+    console.print(
+        Panel(
+            f"[bold]Judge reasoning:[/bold]\n{result.reasoning}\n\n"
+            f"[bold]Resolution:[/bold]\n{result.resolution_summary or '(see proposed revision)'}",
+            title="[yellow]Oversight Review[/yellow]",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    )
+
+    diff = difflib.unified_diff(
+        state.current_prompt.text.splitlines(),
+        revised.text.splitlines(),
+        fromfile=f"v{state.current_prompt.version}",
+        tofile=f"v{revised.version}",
+        lineterm="",
+        n=3,
+    )
+    diff_text = "\n".join(diff)
+    if diff_text:
+        console.print(Panel(diff_text, title="Proposed Changes", border_style="cyan"))
+
+    action = Prompt.ask(
+        "[bold]Accept this resolution?[/bold]",
+        choices=["accept", "reject", "modify"],
+        default="accept",
+    )
+
+    if action == "accept":
+        return True, None
+    if action == "reject":
+        return False, None
+    modification = _get_multiline_input("Enter your modification instructions:")
+    return True, modification
+
+
 def _run_adversarial_loop(state: ChatbotSession, agents: dict, session_mgr: ChatbotSessionManager, config: dict):
     max_rounds = config["loop"]["max_rounds"]
+    oversight = config.get("oversight", False)
     drafter: Drafter = agents["drafter"]
     jailbreak_finder: JailbreakFinder = agents["jailbreak"]
     refusal_finder: RefusalFinder = agents["refusal"]
@@ -182,6 +307,23 @@ def _run_adversarial_loop(state: ChatbotSession, agents: dict, session_mgr: Chat
                     console.print(" [dim]validating...[/dim]", end="")
                     validation = judge.validate(state, revised.text)
                     if validation.passes:
+                        # Oversight gate
+                        if oversight:
+                            accept, modification = _oversight_review(
+                                state, case_obj, result, revised
+                            )
+                            if not accept:
+                                case_obj.status = CaseStatus.ESCALATED
+                                case_obj.resolution = None
+                                case_obj.resolved_by = None
+                                _escalate(state, case_obj, "User rejected auto-resolution.", drafter)
+                                round_escalated += 1
+                                session_mgr.save(state)
+                                continue
+                            if modification:
+                                case_obj.resolution = modification
+                                revised = drafter.revise(state, case_obj)
+
                         state.current_prompt = revised
                         state.prompt_history.append(revised)
                         console.print(f" [green]Resolved -> Prompt v{revised.version}[/green]")
@@ -194,6 +336,23 @@ def _run_adversarial_loop(state: ChatbotSession, agents: dict, session_mgr: Chat
                         _escalate(state, case_obj, validation.details, drafter)
                         round_escalated += 1
                 else:
+                    # Oversight gate
+                    if oversight:
+                        accept, modification = _oversight_review(
+                            state, case_obj, result, revised
+                        )
+                        if not accept:
+                            case_obj.status = CaseStatus.ESCALATED
+                            case_obj.resolution = None
+                            case_obj.resolved_by = None
+                            _escalate(state, case_obj, "User rejected auto-resolution.", drafter)
+                            round_escalated += 1
+                            session_mgr.save(state)
+                            continue
+                        if modification:
+                            case_obj.resolution = modification
+                            revised = drafter.revise(state, case_obj)
+
                     state.current_prompt = revised
                     state.prompt_history.append(revised)
                     console.print(f" [green]Resolved -> Prompt v{revised.version}[/green]")
@@ -207,6 +366,11 @@ def _run_adversarial_loop(state: ChatbotSession, agents: dict, session_mgr: Chat
 
         _display_round_summary(state, len(all_cases), round_auto, round_escalated)
 
+        # Periodic simplification
+        simplify_every = config.get("simplify", {}).get("every_n_rounds", 0)
+        if simplify_every > 0 and state.current_round % simplify_every == 0:
+            _run_simplification(state, agents, session_mgr, config)
+
         console.print()
         action = Prompt.ask(
             "[bold]Next?[/bold]",
@@ -219,6 +383,10 @@ def _run_adversarial_loop(state: ChatbotSession, agents: dict, session_mgr: Chat
                 break
         elif action == "stop":
             break
+
+    # Final simplification pass
+    if config.get("simplify", {}).get("enabled", False):
+        _run_simplification(state, agents, session_mgr, config)
 
     console.print(Rule("[bold green] Session Complete [/bold green]", style="green"))
     _display_prompt(state.current_prompt)
@@ -284,6 +452,9 @@ def new(
     description: str = typer.Option(None, "--desc", help="What the company does"),
     chatbot_config_file: str = typer.Option(None, "--chatbot-config", "-c", help="Path to a YAML chatbot config file"),
     weak: bool = typer.Option(False, "--weak", "-w", help="Start with a deliberately weak/minimal system prompt"),
+    oversight: bool = typer.Option(False, "--oversight", help="Review every auto-judge decision before accepting"),
+    simplify: bool = typer.Option(False, "--simplify", help="Enable simplification passes to compress the system prompt"),
+    simplify_every: int = typer.Option(0, "--simplify-every", help="Simplify every N rounds (0 = only at end)"),
 ):
     """Start a new chatbot system prompt session."""
     console.print(
@@ -298,6 +469,11 @@ def new(
         console.print("[yellow]Weak mode: starting with a minimal, naive system prompt[/yellow]")
 
     config = _load_config()
+    if oversight:
+        config["oversight"] = True
+    if simplify:
+        config.setdefault("simplify", {})["enabled"] = True
+        config["simplify"]["every_n_rounds"] = simplify_every
     agents = _build_agents(config, weak=weak)
 
     if chatbot_config_file:
@@ -374,9 +550,17 @@ def new(
 @app.command()
 def resume(
     session_id: str = typer.Argument(None, help="Session ID to resume"),
+    oversight: bool = typer.Option(False, "--oversight", help="Review every auto-judge decision before accepting"),
+    simplify: bool = typer.Option(False, "--simplify", help="Enable simplification passes to compress the system prompt"),
+    simplify_every: int = typer.Option(0, "--simplify-every", help="Simplify every N rounds (0 = only at end)"),
 ):
     """Resume an existing chatbot session."""
     config = _load_config()
+    if oversight:
+        config["oversight"] = True
+    if simplify:
+        config.setdefault("simplify", {})["enabled"] = True
+        config["simplify"]["every_n_rounds"] = simplify_every
     session_mgr = ChatbotSessionManager(config["session_dir"])
 
     if not session_id:

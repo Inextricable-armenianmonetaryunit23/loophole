@@ -11,7 +11,7 @@ from loophole.chatbot.prompts import (
     REFUSAL_SYSTEM,
     REFUSAL_USER,
 )
-from loophole.llm import LLMClient
+from loophole.llm import LLMProvider
 
 
 def _format_prior_cases(cases: list[TestCase]) -> str:
@@ -41,7 +41,7 @@ class RefusalFinder(BaseAgent):
         llm: LLMClient,
         temperature: float = 0.9,
         cases_per_agent: int = 3,
-        bot_llm: LLMClient | None = None,
+        bot_llm: LLMProvider | None = None,
     ):
         super().__init__(llm, temperature=temperature)
         self.cases_per_agent = cases_per_agent
