@@ -1,6 +1,6 @@
 # Loophole
 
-**Adversarial moral-legal code system** — an AI tool that stress-tests your ethical principles by trying to break them.
+**Adversarial moral-legal code system** — an AI tool that stress-tests ethical principles, system prompts, and legal texts by trying to break them.
 
 ## The Idea
 
@@ -67,7 +67,7 @@ Each resolved case — whether by the Judge or by you — becomes binding preced
 
 ## Setup
 
-Requires Python 3.12+ and an Anthropic API key.
+Requires Python 3.12+ and an Anthropic API key. Optionally supports OpenAI and Ollama models (see Configuration).
 
 ```bash
 # Clone and install
@@ -81,7 +81,7 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 ## Usage
 
-Loophole has two modes: **Legal** (moral-legal code) and **Chatbot** (system prompt stress-testing).
+Loophole has three modes: **Legal** (moral-legal code), **Chatbot** (system prompt stress-testing), and **Reverse** (extract moral DNA from legal texts).
 
 ### Mode 1: Legal — Moral-Legal Code
 
@@ -134,6 +134,35 @@ uv run python -m loophole.chatbot.main list       # List sessions
 
 The HTML report shows each failure as a chat conversation: the attack prompt, the bot's actual response, why it failed, and the git-style diff of how the system prompt was patched.
 
+### Mode 3: Reverse — Extract Moral DNA from Legal Texts
+
+Give it any legal document. Loophole extracts the moral principles the text implies, then two adversarial agents attack those principles:
+
+- **Contradiction Finder**: finds scenarios where two extracted principles can't both be true
+- **Gap Finder**: finds moral values the text assumes but never states
+
+Every conflict goes directly to you. You either refine the principles or mark it as a genuine, unresolvable tension. The tensions list is the real output — a map of where the document's own values contradict each other.
+
+```bash
+# With the bundled US Constitution
+uv run python -m loophole.reverse.main new \
+  --name "US Constitution" \
+  --text examples/us_constitution.txt
+
+# Or any legal text
+uv run python -m loophole.reverse.main new --name "My Company Policy"
+```
+
+Works with constitutions, regulations, terms of service, company policies — anywhere humans write rules, there are buried contradictions.
+
+```bash
+uv run python -m loophole.reverse.main resume     # Resume
+uv run python -m loophole.reverse.main visualize  # HTML report
+uv run python -m loophole.reverse.main list       # List sessions
+```
+
+The HTML report highlights genuine tensions with the scenario, which principles conflict, and your notes on why it's unresolvable.
+
 ## Configuration
 
 Edit `config.yaml` to tune the system:
@@ -143,6 +172,14 @@ model:
   default: "claude-sonnet-4-20250514"   # Adversaries, judge, drafter
   bot: "claude-haiku-4-5-20251001"      # The chatbot being tested (chatbot mode only)
   max_tokens: 4096
+  # Optional: per-role provider overrides (mix Anthropic, OpenAI, Ollama)
+  # providers:
+  #   loophole_finder:
+  #     provider: openai
+  #     model: gpt-4o
+  #   judge:
+  #     provider: ollama
+  #     model: llama3.1:70b
 
 temperatures:
   legislator: 0.4          # Lower = more precise drafting
@@ -154,10 +191,26 @@ loop:
   max_rounds: 10
   cases_per_agent: 3       # How many cases each attacker finds per round
 
+oversight: false            # --oversight: review every auto-judge decision
+
+simplify:
+  enabled: false            # --simplify: compress code/prompts after patching
+  every_n_rounds: 0         # 0 = only at session end
+
 session_dir: "sessions"
 ```
 
-In chatbot mode, the adversaries and judge use the stronger model while the chatbot being tested uses the weaker model. This means the attackers are smarter than their target — which is the right setup for finding real vulnerabilities.
+### Multi-Model Support
+
+Each agent role can use a different provider. Uncomment the `providers:` block in config to mix Anthropic, OpenAI, and open-source models via Ollama. Provider is inferred from model name if not specified (`claude-*` → Anthropic, `gpt-*` → OpenAI, anything else → Ollama).
+
+### Auto-Judge Oversight
+
+Pass `--oversight` to see every auto-judge decision before it's applied. You can accept, reject (escalate to yourself), or modify the resolution. Off by default.
+
+### Simplification
+
+Pass `--simplify` to compress the legal code / system prompt / principles after iterative patching. The simplifier merges redundant rules and tightens language, then validates against all resolved cases. Use `--simplify-every N` to run every N rounds instead of only at the end.
 
 ## Writing Good Principles
 
@@ -175,7 +228,7 @@ See `examples/privacy_principles.txt` for a starting point.
 loophole/
   main.py              Legal mode — CLI and adversarial loop
   models.py            Legal data models (SessionState, Case, LegalCode)
-  llm.py               Shared Anthropic SDK wrapper
+  llm.py               Multi-provider LLM abstraction (Anthropic, OpenAI, Ollama)
   prompts.py           Legal agent prompt templates
   session.py           Legal session persistence
   visualize.py         Legal HTML report generator
@@ -185,6 +238,7 @@ loophole/
     loophole_finder.py Finds legal-but-immoral scenarios
     overreach_finder.py Finds illegal-but-moral scenarios
     judge.py           Auto-resolves or escalates
+    simplifier.py      Compresses legal code after patching
   chatbot/
     main.py            Chatbot mode — CLI and adversarial loop
     models.py          Chatbot data models (ChatbotSession, TestCase, etc.)
@@ -196,9 +250,21 @@ loophole/
       jailbreak.py     Crafts + runs + evaluates jailbreak attacks
       refusal.py       Crafts + runs + evaluates false refusal tests
       judge.py         Auto-resolves or escalates
+      simplifier.py    Compresses system prompts after patching
+  reverse/
+    main.py            Reverse mode — CLI and adversarial loop
+    models.py          Reverse data models (ReverseSession, ReverseFinding, etc.)
+    prompts.py         Reverse agent prompt templates
+    session.py         Reverse session persistence
+    visualize.py       Reverse HTML report generator
+    agents/
+      analyst.py       Extracts and revises moral principles from legal text
+      contradiction_finder.py  Finds conflicts between extracted principles
+      gap_finder.py    Finds values the text implies but principles miss
+      simplifier.py    Compresses principles after refinement
 
 sessions/              One directory per session (auto-created)
-examples/              Example moral principles files
+examples/              Example files (principles, chatbot configs, US Constitution)
 config.yaml            Model and loop configuration
 ```
 
